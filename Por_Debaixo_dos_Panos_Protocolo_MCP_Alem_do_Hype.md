@@ -26,6 +26,43 @@ O RPC faz com que o Cliente possa chamar uma função no Servidor de forma trans
 
 ### Como funciona o RPC (de forma simplificada)?
 
+```mermaid
+sequenceDiagram
+  participant Cliente as Cliente RPC
+  participant StubCliente as Stub do Cliente
+  participant Rede as Rede
+  participant StubServidor as Stub do Servidor
+  participant Servidor as Servidor MCP
+
+  %% Fluxo Simplificado do RPC (Seção "Como funciona o RPC")
+  Cliente->>StubCliente: Chama função remota (ex: obterDadosDoClienteRemoto(cliente_id))
+  StubCliente->>StubCliente: Empacotamento (Marshalling) dos parâmetros
+  StubCliente->>Rede: Transmissão da mensagem
+  Rede-->>StubServidor: Recepção da mensagem
+  StubServidor->>StubServidor: Desempacotamento (Unmarshalling) dos parâmetros
+  StubServidor->>Servidor: Chama função local (ex: buscarInformacoesCliente(id))
+  Servidor->>StubServidor: Execução da função e retorna resultado
+  StubServidor->>StubServidor: Empacotamento do resultado
+  StubServidor->>Rede: Transmissão da resposta
+  Rede-->>StubCliente: Recepção da resposta
+  StubCliente->>StubCliente: Desempacotamento do resultado
+  StubCliente->>Cliente: Retorna resultado
+
+  %% Fluxo Específico do Exemplo de Cotação (Seção "O que acontece por debaixo dos panos")
+  Note over Cliente,Servidor: LLM (via MCP Host)
+  Cliente->>StubCliente: Chama converter("BRL", "USD", 100.00)
+  StubCliente->>StubCliente: Empacota argumentos em JSON-RPC
+  StubCliente->>Rede: Envia mensagem para Serviço de Cotação
+  Rede-->>StubServidor: Recebe mensagem no Serviço de Cotação
+  StubServidor->>StubServidor: Desempacota argumentos
+  StubServidor->>Servidor: Executa função de conversão
+  Servidor->>StubServidor: Retorna resultado (20.00)
+  StubServidor->>StubServidor: Empacota resultado
+  StubServidor->>Rede: Envia resposta de volta
+  Rede-->>StubCliente: Recebe 20.00
+  StubCliente->>Cliente: Retorna 20.00 para o LLM
+```
+
 1.  **O Cliente chama uma função "stub" (de esboço/representante):** No lado do cliente, há um pedaço de código chamado "stub do cliente". Quando o programa cliente chama a função remota (ex: `obterDadosDoClienteRemoto(cliente_id)`), ele na verdade está chamando uma função nesse stub do cliente.
 2.  **Empacotamento (Marshalling):** O stub do cliente pega os parâmetros da função (`cliente_id`) e informações sobre qual função executar, e os "empacota" em uma mensagem padronizada (ex: JSON, Protocol Buffers). Esse processo é chamado de *marshalling*.
 3.  **Transmissão pela Rede:** O stub do cliente envia essa mensagem pela rede para o servidor MCP.
@@ -51,6 +88,28 @@ Imagine que um LLM precisa fornecer uma resposta que envolve a cotação atual d
 
 **O que acontece "por debaixo dos panos" (RPC):**
 
+```mermaid
+sequenceDiagram
+  participant MCPHost as MCP Host (Cliente RPC)
+  participant CambioStub as Stub da ferramenta_cambio
+  participant Rede as Rede
+  participant CotacaoStub as Stub RPC (Serviço de Cotação)
+  participant ServicoCotacao as Serviço de Cotação (Servidor MCP)
+
+  %% Exemplo Prático de RPC: Um Serviço de Cotação de Moedas como Ferramenta MCP
+  MCPHost->>CambioStub: Chama converter("BRL", "USD", 100.00)
+  CambioStub->>CambioStub: Empacota argumentos em JSON-RPC
+  CambioStub->>Rede: Envia mensagem para Serviço de Cotação
+  Rede-->>CotacaoStub: Recebe mensagem no Serviço de Cotação
+  CotacaoStub->>CotacaoStub: Desempacota argumentos
+  CotacaoStub->>ServicoCotacao: Executa função de conversão
+  ServicoCotacao->>CotacaoStub: Retorna resultado (20.00)
+  CotacaoStub->>CotacaoStub: Empacota resultado
+  CotacaoStub->>Rede: Envia resposta de volta
+  Rede-->>CambioStub: Recebe 20.00
+  CambioStub->>MCPHost: Retorna 20.00 para o LLM
+```
+
 1.  O "MCP Host" (atuando como cliente RPC) chama a função `converter` no stub da `ferramenta_cambio`.
 2.  O stub empacota os argumentos ("BRL", "USD", 100.00) em uma mensagem JSON-RPC (um formato comum para RPC sobre HTTP).
 3.  A mensagem é enviada pela rede para o Serviço de Cotação.
@@ -60,168 +119,6 @@ Imagine que um LLM precisa fornecer uma resposta que envolve a cotação atual d
 7.  O stub no "MCP Host" recebe `20.00` e o retorna para o fluxo do LLM.
 
 O LLM obteve a informação necessária sem precisar saber como o Serviço de Cotação funciona internamente ou como se comunicar diretamente com ele em baixo nível. Tecnologias como gRPC, Apache Thrift, e o próprio JSON-RPC são exemplos de implementações RPC que podem ser usadas aqui.
-
-## Nossa Arquitetura para a Plataforma MCP
-
-Para dar vida a essa capacidade de integração, propomos uma arquitetura robusta e escalável, gerenciada em um monorepo no GitLab e implantada em um cluster Kubernetes. O diagrama abaixo oferece uma visão geral:
-
-&#x200B;```mermaid
-graph TB
-  %% Titulo do Diagrama
-  %% title Arquitetura de Plataforma MCP com K8s e Core Modular
-
-  subgraph "GitLab Monorepo: mcp-platform"
-    direction LR
-    subgraph "1. Componentes Core e Templates"
-        MCPCore["<strong>mcp-core (Versionado)</strong><br/>- Dockerfile.base<br/>- Bibliotecas Compartilhadas<br/>- Scripts Utilitários"]
-        K8S_Templates["<strong>Templates K8S</strong><br/>(Bases Kustomize /<br/> Helm Library Charts)"]
-    end
-
-    subgraph "2. Serviços de Aplicação"
-        direction TB
-        MCPServers["<strong>mcp-servers/</strong><br/>(Serviços MCP Individuais)"]
-        ServiceA["mcp-servico-A<br/>(src/, Dockerfile, k8s/base, k8s/overlays)"]
-        ServiceB["mcp-servico-B<br/>(src/, Dockerfile, k8s/base, k8s/overlays)"]
-        ServiceEtc["... (outros MCPs)"]
-        HostApp["<strong>host-app (Orquestrador MCP)</strong><br/>(src/, Dockerfile, k8s/base, k8s/overlays)"]
-    end
-
-    GlobalK8SConfig["<strong>k8s-global-config</strong><br/>(Namespaces, RBAC,<br/>Config Ingress Controller)"]
-  end
-
-  subgraph "3. Pipeline GitLab CI/CD"
-    direction TB
-    CI_Build["<strong>Etapa de Build & Test</strong><br/>- Constrói imagens Docker usando MCPCore<br/>- Executa testes unitários/integração"]
-    CI_Deploy["<strong>Etapa de Deploy</strong><br/>- Aplica manifestos K8S<br/>  (de k8s/overlays via Kustomize/Helm)"]
-  end
-
-  subgraph "4. Kubernetes Cluster (Ambiente de Runtime)"
-    direction TB
-    K8S_APIGateway["API Gateway / K8s Ingress"]
-    K8S_HostApp["host-app (Pods)"]
-    K8S_ServiceA["mcp-servico-A (Pods)"]
-    K8S_ServiceB["mcp-servico-B (Pods)"]
-    K8S_ServiceEtc["... (outros MCPs em Pods)"]
-    K8S_ServiceDiscovery["K8s Service Discovery (DNS Interno)"]
-  end
-
-  %% Dependências de Build e Configuração
-  MCPCore          -- "Utilizado em" --> CI_Build
-  K8S_Templates    -- "Utilizado para" --> CI_Deploy
-  ServiceA         -- "Código Fonte" --> CI_Build
-  ServiceB         -- "Código Fonte" --> CI_Build
-  HostApp          -- "Código Fonte" --> CI_Build
-  GlobalK8SConfig  -- "Configuração Aplicada por" --> CI_Deploy
-
-  %% Fluxo CI/CD
-  CI_Build -- "Gera Artefatos para" --> CI_Deploy
-
-  %% Fluxo de Deploy para K8s
-  CI_Deploy -- "Implanta/Atualiza" --> K8S_APIGateway
-  CI_Deploy -- "Implanta/Atualiza" --> K8S_HostApp
-  CI_Deploy -- "Implanta/Atualiza" --> K8S_ServiceA
-  CI_Deploy -- "Implanta/Atualiza" --> K8S_ServiceB
-  CI_Deploy -- "Implanta/Atualiza" --> K8S_ServiceEtc
-
-  %% Interações de Runtime Simplificadas (detalhes no diagrama de sequência)
-  K8S_APIGateway       --> K8S_HostApp
-  K8S_HostApp          -- "Comunica-se via" --- K8S_ServiceDiscovery
-  K8S_ServiceDiscovery --- K8S_ServiceA
-  K8S_ServiceDiscovery --- K8S_ServiceB
-  K8S_ServiceDiscovery --- K8S_ServiceEtc
-
-
-  %% Agrupamentos visuais no monorepo
-  MCPServers --> ServiceA
-  MCPServers --> ServiceB
-  MCPServers --> ServiceEtc
-
-  %% Estilização (opcional, para melhor visualização)
-  classDef component fill:#f9f,stroke:#333,stroke-width:2px;
-  classDef pipeline fill:#ccf,stroke:#333,stroke-width:2px;
-  classDef k8s fill:#cfc,stroke:#333,stroke-width:2px;
-
-  class MCPCore,K8S_Templates,MCPServers,ServiceA,ServiceB,ServiceEtc,HostApp,GlobalK8SConfig component;
-  class CI_Build,CI_Deploy pipeline;
-  class K8S_APIGateway,K8S_HostApp,K8S_ServiceA,K8S_ServiceB,K8S_ServiceEtc,K8S_ServiceDiscovery k8s;
-&#x200B;```
-
-## Fluxo de Requisição em Tempo de Execução
-
-Para entender como uma requisição é processada em tempo de execução, desde o cliente (ou o LLM) até um serviço MCP específico e de volta, o diagrama de sequência a seguir é bastante elucidativo:
-
-&#x200B;```mermaid
-sequenceDiagram
-    %% Título do Diagrama
-    %% title Fluxo de Requisição em Tempo de Execução na Plataforma MCP
-
-    actor Client as Usuário / Sistema Externo / LLM
-    participant APIGateway as API Gateway / K8s Ingress
-    participant MCPhost as MCP Host (host-app / Orquestrador)
-    participant MCPSvcA as MCP Serviço A (Exemplo)
-    participant DataSourceA as Fonte de Dados / Ferramenta Externa de A
-
-    %% Fluxo da Requisição
-    Client->>+APIGateway: 1. Envia Requisição (ex: LLM precisa de dados do Serviço A)
-    APIGateway->>+MCPhost: 2. Autentica e Roteia Requisição para o Orquestrador MCP
-    Note right of MCPhost: MCPhost determina qual(is) ferramenta(s) MCP invocar<br/>com base na solicitação do LLM.
-    MCPhost->>+MCPSvcA: 3. Invoca Ferramenta no MCP Serviço A<br/>(JSON-RPC via K8s Service Discovery)
-    activate MCPSvcA
-
-    MCPSvcA->>+DataSourceA: 4. Acessa/Consulta Fonte de Dados/Ferramenta Externa
-    activate DataSourceA
-    DataSourceA-->>-MCPSvcA: 5. Retorna Dados/Resultado para o Serviço MCP
-    deactivate DataSourceA
-
-    MCPSvcA-->>-MCPhost: 6. Retorna Resposta da Ferramenta para o Orquestrador MCP
-    deactivate MCPSvcA
-    Note right of MCPhost: MCPhost pode agregar respostas de múltiplos MCPs<br/>ou formatar para o LLM.
-    MCPhost-->>-APIGateway: 7. Envia Resposta Consolidada
-    deactivate MCPhost
-
-    APIGateway-->>-Client: 8. Retorna Resposta Final para o LLM/Usuário
-    deactivate APIGateway
-&#x200B;```
-
-## Pontos Cruciais de Segurança em Ambientes MCP/RPC
-
-Ao conectar LLMs a sistemas externos, a segurança se torna uma preocupação primordial. Afinal, estamos abrindo portas para que a IA interaja com dados e execute ações. Aqui estão alguns pontos críticos:
-
-1.  **Autenticação e Autorização Robustas:**
-    * **Entre Serviços (RPC):** Cada chamada RPC entre o "MCP Host" e os "Servidores MCP" deve ser autenticada (ex: mTLS, tokens JWT). Os servidores MCP devem autorizar se o chamador tem permissão para executar a função solicitada.
-    * **Acesso às Ferramentas:** O LLM (ou o "MCP Host" agindo em seu nome) deve ter permissões granulares. Ele não deve ter acesso irrestrito a todas as ferramentas ou dados. Princípio do menor privilégio é chave.
-    * **Usuário Final:** Se a ação do LLM é em nome de um usuário, as permissões desse usuário devem ser propagadas e verificadas.
-
-2.  **Validação de Entrada e Saída (Sanitização):**
-    * **Entradas para Ferramentas:** Dados enviados pelo LLM para as ferramentas MCP devem ser rigorosamente validados e sanitizados para prevenir ataques de injeção (ex: SQL Injection, Command Injection) nas ferramentas subjacentes.
-    * **Saídas das Ferramentas:** Dados retornados pelas ferramentas MCP para o LLM também devem ser validados. Informações sensíveis inesperadas ou malformadas podem levar a comportamentos indesejados ou vazamento de dados através do LLM.
-
-3.  **Controle de Escopo e Limites de Recursos:**
-    * **"Roots" e Permissões de Arquivos:** O MCP especifica o conceito de "roots" (raízes), que são diretórios ou escopos de dados permitidos para cada servidor MCP. Isso deve ser estritamente configurado.
-    * **Rate Limiting e Quotas:** Para prevenir abuso ou sobrecarga, tanto o "MCP Host" quanto os "Servidores MCP" devem implementar rate limiting e quotas nas chamadas RPC.
-
-4.  **Isolamento de Rede e Segmentação:**
-    * No Kubernetes, use NetworkPolicies para restringir quais pods podem se comunicar entre si. Um "Servidor MCP" só deve ser acessível pelo "MCP Host" ou outros componentes autorizados.
-
-5.  **Logging e Monitoramento de Segurança:**
-    * Todas as chamadas RPC, decisões de autorização e acessos a dados devem ser logados para auditoria e detecção de anomalias.
-    * Monitore o comportamento das interações LLM-ferramenta para identificar padrões suspeitos.
-
-6.  **Proteção contra Ataques Específicos a LLMs:**
-    * **Prompt Injection nas Ferramentas:** Se o LLM constrói parâmetros para ferramentas MCP com base na entrada do usuário, cuidado com prompt injection que poderia fazer o LLM instruir uma ferramenta a realizar ações maliciosas.
-    * **Vazamento de Dados Confidenciais:** Garanta que ferramentas MCP não retornem dados excessivos ou sensíveis que o LLM possa inadvertidamente expor.
-
-7.  **Segurança da Infraestrutura RPC:**
-    * Mantenha as bibliotecas RPC (gRPC, etc.) e o sistema operacional dos servidores atualizados.
-    * Use canais de comunicação criptografados (TLS) para todas as transmissões RPC.
-
-A segurança em sistemas que utilizam MCP e RPC é uma responsabilidade compartilhada e requer uma abordagem de defesa em profundidade.
-
-## Conclusão
-
-O Model Context Protocol, impulsionado por mecanismos como RPC, representa um avanço significativo na capacidade dos LLMs de interagir com o mundo de forma útil e contextualizada. No entanto, como toda tecnologia poderosa, vem com a responsabilidade de implementá-la de forma segura e consciente.
-
-Esperamos que esta visão "por debaixo dos panos" tenha sido esclarecedora. A jornada para construir IAs verdadeiramente integradas e seguras está apenas começando!
 
 ## 📞 Contato
 
@@ -234,4 +131,3 @@ Se você tiver dúvidas, sugestões ou precisar de suporte sobre nossa plataform
 ---
 
 Feito com ❤️ pela equipe CoAgentis
-
